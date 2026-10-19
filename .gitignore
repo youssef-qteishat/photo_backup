@@ -12,6 +12,8 @@
 .swiftpm/
 migrate_working_dir/
 
+.env
+
 # IntelliJ related
 *.iml
 *.ipr
@@ -46,3 +48,6 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+#notes
+photo-backup-dev-plan.md

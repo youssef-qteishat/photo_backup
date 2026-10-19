@@ -1,0 +1,76 @@
+# For detailed configuration reference documentation, visit:
+# https://supabase.com/docs/guides/local-development/cli/config
+# A string used to distinguish different Supabase projects on the same host. Defaults to the
+# working directory name when running `supabase init`.
+project_id = "photo_backup"
+
+[api]
+enabled = true
+# Port to use for the API URL.
+port = 54321
+
+[db]
+# Port to use for the local database URL.
+port = 54322
+# Port used by db diff command to initialize the shadow database.
+shadow_port = 54320
+# Maximum amount of time to wait for health check when starting the local database.
+health_timeout = "2m"
+# The database major version to use. This has to be the same as your remote database's. Run `SHOW
+# server_version;` on the remote database to check.
+major_version = 17
+# OrioleDB version to use as the Postgres storage engine. Leave empty to use the default engine.
+orioledb_version = ""
+
+
+[storage]
+enabled = true
+# The maximum file size allowed (e.g. "5MB", "500KB").
+file_size_limit = "5GiB"
+
+# Image transformation API is available to Supabase Pro plan.
+[storage.image_transformation]
+enabled = false
+
+[storage.buckets.backups] # add if missing: creates the bucket from config
+public = false           # private: files need a signed-in user
+file_size_limit = "4GiB" # simulates FAT32's per-file limit (approx.)
+# allowed_mime_types: leave unset on purpose (see below)
+
+[auth]
+enabled = true
+# The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
+# in emails.
+site_url = "http://127.0.0.1:3000"
+enable_signup = true
+enable_anonymous_sign_ins = false
+# How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
+jwt_expiry = 86400
+
+[auth.email]
+enabled = false
+
+[edge_runtime]
+enabled = false
+
+[realtime]
+enabled = false
+# Bind realtime via either IPv4 or IPv6. (default: IPv4)
+# ip_version = "IPv6"
+# The maximum length in bytes of HTTP request headers. (default: 4096)
+# max_header_length = 4096
+
+[analytics]
+enabled = false
+
+[inbucket]
+enabled = false
+
+[studio]
+enabled = true
+# Port to use for Supabase Studio.
+port = 54323
+# External URL of the API server that frontend connects to.
+api_url = "http://127.0.0.1"
+# OpenAI API Key to use for Supabase AI in the Supabase Studio.
+# openai_api_key = "env(OPENAI_API_KEY)"
