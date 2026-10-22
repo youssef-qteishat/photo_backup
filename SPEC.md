@@ -29,9 +29,14 @@
 - `BackupEngine` depends on `Discovery`, `Manifest`, `HashWorker`, and the
   `BackupDestination` interface. It never imports Supabase.
 - Only `SupabaseDestination` imports `supabase_flutter` or makes network calls.
-- `BackupDestination` exposes `exists`, `upload`, `remoteHash`, `freeSpace`,
-  `writeManifest`, `readManifest`, `list`, and `download`
-  (`list` and `download` make restore and verification possible later).
+- `BackupDestination` exposes `exists`, `upload(path, file, sha256:)`, `remoteHash`,
+  `move` (overwrites target), `delete`, `freeSpace`, `writeManifest`, and `readManifest`.
+  Failures throw `DestinationException` carrying a `FailureKind`.
+- `remoteHash` returns the SHA-256 the client stored as object metadata at upload
+  (Supabase can't hash server-side), so verification confirms the right object landed,
+  not a server-side recomputation of its bytes.
+- `SupabaseDestination.upload` streams its own multipart POST, because
+  `storage_client`'s `upload()` reads the whole file into memory.
 - Tests use `FakeDestination`; no test touches the network.
 
 ### Job State Diagram
@@ -65,7 +70,7 @@ Legal transitions (everything else is illegal, including self-transitions):
 | `failed`    | `pending`                               | Retry (automatic or manual)                                   |
 
 - Legal transitions live in one `canTransition(from, to)` function. Illegal transitions throw.
-- `canTransition` checks states only. Retry limits are engine policy, not state-machine rules: the engine auto-retries `transient` failures while `attempts < 3`, and never auto-retries `permanent` ones. Any `failed` job can be retried manually.
+- `canTransition` checks states only. Retry limits are engine policy, not state-machine rules: the engine auto-retries `transient` failures up to 3 times (1s, 2s, 4s; 4 attempts in total), and never auto-retries `permanent` ones. Any `failed` job can be retried manually.
 - Final states: `done` and `skipped` (no outgoing transitions). `failed` is not final.
 - A job is never `done` before its hash is verified.
 
@@ -92,12 +97,14 @@ class BackupJob {
   final MediaItem item;
   final JobState state;
   final int attempts;          // incremented each time the job enters `hashing`
-  final String remotePath;     // <user-id>/<yyyy>/<fileName>
+  final String remotePath;     // <user-id>/<yyyy>/<fileName>; `_<8hex>` before the extension if another asset holds that path
   final String? sha256;        // set after hashing
   final String? reason;        // required when state is failed or skipped, null otherwise
   final FailureKind? failureKind; // required when state is failed, null otherwise
 
-  BackupJob transitionTo(JobState next, {String? reason, FailureKind? kind}); // throws on illegal transition
+  // Throws ArgumentError on an illegal transition, or when entering failed/skipped without a reason
+  // (or failed without a kind). `sha256` is kept from the previous state unless a new one is passed.
+  BackupJob transitionTo(JobState next, {String? reason, FailureKind? kind, String? sha256});
 }
 
 bool canTransition(JobState from, JobState to);
@@ -151,7 +158,7 @@ Pipeline is 5 parts:
 - Explicitly excluded:
   - Browsable Gallery of Backed-up photos and videos
     - Files are stored in a Docker volume
-  - Restore UI (`list` and `download` exist on the interface, but nothing calls them yet)
+  - Restore (no `list` / `download` on `BackupDestination` until it's in scope)
   - Parallel uploads (jobs run one at a time; stretch goal)
 - Dependencies or contracts that must not change:
   - every backup path in your app will start with the user’s ID (Ex: <user-id>/2026/IMG_0001.HEIC)
@@ -164,6 +171,7 @@ Pipeline is 5 parts:
    - Content hashes resolve ambiguous cases, such as a file that was renamed but not changed.
    - Renamed but unchanged (same hash as an existing manifest entry, new asset ID): skip the upload and add a manifest row pointing at the existing remote path.
    - Keep the manifest on the destination as well as on the phone (`<user-id>/manifest.json`), so a reinstalled app or a second phone can still tell what the drive already holds.
+   - Rows for assets deleted from the device are kept (backups are additive). Restoring from `manifest.json` inserts only rows missing locally; local rows win on conflict.
 
 3. Queue. Each file becomes a job with a state: pending, hashing, uploading, verifying, done, failed, or skipped. Save the queue to disk (SQLite), not just memory. Then if the app is killed mid-backup, it reopens knowing exactly where it stopped. That persistence is what makes resume work.
    - On startup, any job in `hashing`, `uploading`, or `verifying` goes back to `pending`.
@@ -175,6 +183,7 @@ Pipeline is 5 parts:
 
 5. Report. Hashing runs in a background isolate so the UI never freezes. Uploads stay on the main isolate, since async network I/O doesn't block it. Progress is exposed to the UI as a `Stream<BackupProgress>`.
    - Track progress in bytes, not file count, so one large video doesn’t freeze the bar at “99 of 100.”
+   - Progress counts hashed + uploaded bytes (`bytesTotal = 2 × Σ sizes`), so the bar moves during hashing too; show it as a percentage.
    - Pause and cancel are flags the engine checks between steps. Pause finishes the current file, then stops pulling jobs. Cancel aborts the in-flight job, deletes its `.part` file, and returns it to `pending`.
 
 ## Evidence
@@ -189,6 +198,7 @@ Pipeline is 5 parts:
   - Engine: a file over the size limit fails with a clear reason and doesn't block the rest.
   - Engine: running twice in a row uploads nothing the second time.
   - Retries: a transient error is retried 3 times (1s/2s/4s, using a fake clock) before the job ends in `failed`.
+- Integration (opt-in, needs local Supabase): `flutter test --tags integration --dart-define-from-file=env/simulator.env` uploads a `.part`, verifies its hash, moves it to the final path, and round-trips the manifest.
 - Manual checks:
   - Full backup on the Simulator; files appear under `<user-id>/` in Studio.
   - Turn Wi-Fi off on the iPhone mid-job: the job fails, then succeeds on retry.
@@ -209,7 +219,7 @@ Pipeline is 5 parts:
   - Answer: Skip it and record why
 
 - Question: What happens in the event of transient errors?
-  - Answer: retry with exponential backoff: 3 attempts (1s, 2s, 4s), then `failed(reason)`
+  - Answer: retry with exponential backoff: 3 retries (1s, 2s, 4s), then `failed(reason)`
 
 ## Note
 
