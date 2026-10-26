@@ -39,6 +39,26 @@ class JobQueue {
         counts_json       TEXT NOT NULL,
         bytes_transferred INTEGER NOT NULL
       )''');
+    // Snapshot of each run's jobs for the history screen. Same columns as
+    // `jobs`, plus the run they belong to.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS run_jobs (
+        run_id       INTEGER NOT NULL,
+        asset_id     TEXT NOT NULL,
+        file_name    TEXT NOT NULL,
+        size_bytes   INTEGER NOT NULL,
+        modified_at  INTEGER NOT NULL,
+        media_type   TEXT NOT NULL,
+        state        TEXT NOT NULL,
+        attempts     INTEGER NOT NULL,
+        remote_path  TEXT NOT NULL,
+        sha256       TEXT,
+        reason       TEXT,
+        failure_kind TEXT
+      )''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS run_jobs_run_id ON run_jobs(run_id)',
+    );
     return JobQueue._(db);
   }
 
@@ -86,14 +106,33 @@ class JobQueue {
         limit: 1,
       )).isNotEmpty;
 
-  Future<void> recordRun(BackupRun run) => _db.insert('runs', {
-    'started_at': run.startedAt.millisecondsSinceEpoch,
-    'finished_at': run.finishedAt?.millisecondsSinceEpoch,
-    'counts_json': jsonEncode({
-      for (final e in run.counts.entries) e.key.name: e.value,
-    }),
-    'bytes_transferred': run.bytesTransferred,
-  });
+  /// Stores [run] and a snapshot of its [jobs]; returns the run's id.
+  // ponytail: history grows forever; prune runs older than N if it matters.
+  Future<int> recordRun(BackupRun run, Iterable<BackupJob> jobs) =>
+      _db.transaction((txn) async {
+        final id = await txn.insert('runs', {
+          'started_at': run.startedAt.millisecondsSinceEpoch,
+          'finished_at': run.finishedAt?.millisecondsSinceEpoch,
+          'counts_json': jsonEncode({
+            for (final e in run.counts.entries) e.key.name: e.value,
+          }),
+          'bytes_transferred': run.bytesTransferred,
+        });
+        final batch = txn.batch();
+        for (final job in jobs) {
+          batch.insert('run_jobs', {'run_id': id, ..._toRow(job)});
+        }
+        await batch.commit(noResult: true);
+        return id;
+      });
+
+  /// The jobs of one run, in queue order.
+  Future<List<BackupJob>> runJobs(int runId) async => (await _db.query(
+    'run_jobs',
+    where: 'run_id = ?',
+    whereArgs: [runId],
+    orderBy: 'rowid',
+  )).map(_fromRow).toList();
 
   /// Newest first, for the history screen.
   Future<List<BackupRun>> runs() async {
@@ -101,6 +140,7 @@ class JobQueue {
     return [
       for (final r in rows)
         BackupRun(
+          id: r['id'] as int,
           startedAt: DateTime.fromMillisecondsSinceEpoch(
             r['started_at'] as int,
           ),

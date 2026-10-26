@@ -11,11 +11,13 @@ import '../domain/backup_progress.dart';
 import '../domain/backup_run.dart';
 import '../domain/manifest_entry.dart';
 import '../domain/media_item.dart';
+import '../domain/source_exception.dart';
 import '../hashing/hash_worker.dart';
 import '../manifest/manifest_store.dart';
 import 'job_queue.dart';
 
 /// Returns the local file for an asset, or null if it no longer exists.
+/// Throws [SourceException] for retryable fetch failures (e.g. iCloud).
 typedef FileResolver = Future<File?> Function(MediaItem item);
 typedef Sleep = Future<void> Function(Duration duration);
 
@@ -68,6 +70,21 @@ class BackupEngine {
   // throw from the upload's onProgress if it needs to abort mid-stream.
   void cancel() => _cancelRequested = true;
 
+  /// Past runs, newest first (history screen).
+  Future<List<BackupRun>> history() => _queue.runs();
+
+  /// The files a past run handled, with their final state and reason.
+  Future<List<BackupJob>> runJobs(int runId) => _queue.runJobs(runId);
+
+  /// Failed or skipped jobs, with reasons, from the latest run.
+  // ponytail: finished rows are cleared when the next run starts, so only
+  // the latest run's problems are kept; persist them per run if History
+  // needs older ones.
+  Future<List<BackupJob>> problems() async => [
+    for (final job in await _queue.all())
+      if (job.state == JobState.failed || job.state == JobState.skipped) job,
+  ];
+
   /// Backs up whatever in [discovered] isn't in the manifest, plus any jobs
   /// left pending by an earlier (paused, cancelled or killed) run.
   Future<BackupRun> run(List<MediaItem> discovered) async {
@@ -81,7 +98,14 @@ class BackupEngine {
 
     await _queue.recoverInFlight();
     await _queue.clearFinished();
-    await _ignoreDestinationErrors(() => _manifest.pullFrom(_destination));
+    // The remote copy only fills gaps after a reinstall. If it's unreadable,
+    // carry on: the local manifest is the source of truth, and pushTo() at
+    // the end of the run overwrites it with a valid one.
+    try {
+      await _ignoreDestinationErrors(() => _manifest.pullFrom(_destination));
+    } on FormatException {
+      // ponytail: silent; surface it in BackupRun if the UI should show it.
+    }
     for (final item in await _manifest.needsBackup(discovered)) {
       await _queue.enqueue(item, await _pathFor(item));
     }
@@ -106,8 +130,13 @@ class BackupEngine {
       counts: _counts(),
       bytesTransferred: _bytesTransferred,
     );
-    await _queue.recordRun(run);
-    return run;
+    return BackupRun(
+      id: await _queue.recordRun(run, _jobs.values),
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      counts: run.counts,
+      bytesTransferred: run.bytesTransferred,
+    );
   }
 
   /// Runs attempts until the job settles; transient failures retry with
@@ -134,6 +163,18 @@ class BackupEngine {
     final part = '${job.remotePath}.part';
     _currentFile = item.fileName;
     try {
+      // Size first, so an oversize iCloud original isn't downloaded just to
+      // fail. Resolving happens inside `hashing`, where failed/skipped are
+      // both legal (fetching an original can fail transiently).
+      job = await _set(id, job.transitionTo(JobState.hashing));
+      if (item.sizeBytes > _maxFileBytes) {
+        await _fail(
+          id,
+          FailureKind.permanent,
+          '${item.sizeBytes} bytes exceeds the $_maxFileBytes byte limit',
+        );
+        return;
+      }
       final file = await _resolveFile(item);
       if (file == null) {
         await _set(
@@ -142,16 +183,6 @@ class BackupEngine {
             JobState.skipped,
             reason: 'asset no longer available',
           ),
-        );
-        return;
-      }
-
-      job = await _set(id, job.transitionTo(JobState.hashing));
-      if (item.sizeBytes > _maxFileBytes) {
-        await _fail(
-          id,
-          FailureKind.permanent,
-          '${item.sizeBytes} bytes exceeds the $_maxFileBytes byte limit',
         );
         return;
       }
@@ -213,6 +244,8 @@ class BackupEngine {
       await _manifest.record(_entry(item, hash, job.remotePath));
       await _set(id, job.transitionTo(JobState.done));
     } on DestinationException catch (e) {
+      await _fail(id, e.kind, e.message);
+    } on SourceException catch (e) {
       await _fail(id, e.kind, e.message);
     } on FileSystemException catch (e) {
       // Deleted or permission revoked mid-run (SPEC: skip and record why).

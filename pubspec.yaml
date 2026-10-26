@@ -38,6 +38,8 @@ dependencies:
   http: ^1.6.0
   sqflite: ^2.4.5
   crypto: ^3.0.7
+  photo_manager: ^3.12.0
+  wakelock_plus: ^1.8.2
 
 dev_dependencies:
   flutter_test:

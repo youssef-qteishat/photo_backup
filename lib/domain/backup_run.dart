@@ -2,6 +2,8 @@ import 'package:photo_backup/domain/backup_job.dart';
 
 class BackupRun {
   // history screen
+  /// Set once the run is stored; used to load the run's jobs.
+  final int? id;
   final DateTime startedAt;
   final DateTime? finishedAt;
   final Map<JobState, int> counts;
@@ -9,6 +11,7 @@ class BackupRun {
 
   // Copies counts so a stored run can't change later.
   BackupRun({
+    this.id,
     required this.startedAt,
     required this.finishedAt,
     required Map<JobState, int> counts,

@@ -6,6 +6,17 @@
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app requires access to your photo library to display and select media.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+    <string>Photo Backup connects to the backup service running on your computer.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
 	<key>CFBundleDisplayName</key>
 	<string>Photo Backup</string>
 	<key>CFBundleExecutable</key>

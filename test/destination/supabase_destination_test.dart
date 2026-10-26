@@ -83,7 +83,12 @@ void main() => group(
         await dest.writeManifest('{"test":true}');
         expect(await dest.readManifest(), '{"test":true}');
       } finally {
-        if (original != null) await dest.writeManifest(original);
+        // Never leave the dummy behind: it would break the app's next run.
+        if (original != null) {
+          await dest.writeManifest(original);
+        } else {
+          await dest.delete('${dest.userId}/manifest.json');
+        }
       }
     });
   },

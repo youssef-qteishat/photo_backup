@@ -29,6 +29,7 @@
 - `BackupEngine` depends on `Discovery`, `Manifest`, `HashWorker`, and the
   `BackupDestination` interface. It never imports Supabase.
 - Only `SupabaseDestination` imports `supabase_flutter` or makes network calls.
+- Only `PhotoDiscovery` imports `photo_manager`; the engine sees `MediaItem`s and a `FileResolver`.
 - `BackupDestination` exposes `exists`, `upload(path, file, sha256:)`, `remoteHash`,
   `move` (overwrites target), `delete`, `freeSpace`, `writeManifest`, and `readManifest`.
   Failures throw `DestinationException` carrying a `FailureKind`.
@@ -125,7 +126,8 @@ class BackupProgress {
   final Map<JobState, int> counts;
 }
 
-class BackupRun { // history screen
+class BackupRun { // history screen; each stored run keeps a snapshot of its jobs
+  final int? id;               // set once stored; used to load the run's jobs
   final DateTime startedAt;
   final DateTime? finishedAt;
   final Map<JobState, int> counts;
@@ -147,7 +149,7 @@ Pipeline is 5 parts:
 
 - In scope:
   - The 5-stage pipeline above, with incremental diffing and crash-safe resume.
-  - One screen: progress bar, pause/resume/cancel, history of past runs.
+  - Two screens: Backup (progress bar, current file, pause/resume/cancel, counts) and History (past runs, failed/skipped files with reasons).
 - Allowed write paths:
   - `lib/`, `test/`, `pubspec.yaml`, `ios/Runner/Info.plist`, `supabase/`
 - Read-only context:
@@ -166,6 +168,9 @@ Pipeline is 5 parts:
 ## Acceptance Criteria
 
 1. Discover. List everything in the source. On a phone that means asking for photo-library permission and reading assets through a plugin like photo_manager. On desktop it’s walking a folder. Each item becomes a lightweight record: an ID, the file name, size, modified date, and type.
+   - Permission has three outcomes: full access, limited access (only user-selected assets are discovered and backed up; the app offers "Select more"), and denied (the app explains why and links to Settings).
+   - Listing reads sizes from PhotoKit metadata and never downloads iCloud originals. Fetching the original happens inside `hashing` (after the size check); a failed fetch is a `transient` `SourceException` and is retried.
+   - Live Photos: only the main image is backed up for now.
 
 2. Diff against a manifest. This is what makes backups incremental. The app keeps a manifest of what’s already been backed up, keyed by asset ID plus size and modified time. Anything missing or changed becomes a job in this run; unchanged items are not queued at all (the `skipped` state is only for jobs that hit a reason mid-run).
    - Content hashes resolve ambiguous cases, such as a file that was renamed but not changed.
@@ -185,6 +190,7 @@ Pipeline is 5 parts:
    - Track progress in bytes, not file count, so one large video doesn’t freeze the bar at “99 of 100.”
    - Progress counts hashed + uploaded bytes (`bytesTotal = 2 × Σ sizes`), so the bar moves during hashing too; show it as a percentage.
    - Pause and cancel are flags the engine checks between steps. Pause finishes the current file, then stops pulling jobs. Cancel aborts the in-flight job, deletes its `.part` file, and returns it to `pending`.
+   - Backgrounding the app (iOS suspends it) auto-pauses the backup; returning resumes it. A pause the user chose is never auto-resumed. The screen is kept awake (wakelock) only while a backup runs.
 
 ## Evidence
 

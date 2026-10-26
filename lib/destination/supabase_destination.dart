@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:photo_backup/destination/supabase_config.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../domain/backup_job.dart';
@@ -20,6 +21,54 @@ class SupabaseDestination implements BackupDestination {
     this.bucket = 'backups',
     this.quotaBytes = 10 * 1024 * 1024 * 1024,
   });
+
+  // ponytail: test-user credentials come from dart-defines, so they're
+  // compiled into the app. Fine for a local-only MVP; a real app needs a
+  // sign-in screen.
+  static const _email = String.fromEnvironment('TEST_EMAIL');
+  static const _password = String.fromEnvironment('TEST_PASSWORD');
+
+  /// Initializes Supabase from the env file and signs in the test user.
+  /// Throws (StateError, AuthException, TimeoutException, ...) if the config
+  /// is missing or the server can't be reached; main() shows the error.
+  static Future<SupabaseDestination> create() async {
+    if (!isConfigured) {
+      throw StateError(
+        'SUPABASE_URL / SUPABASE_ANON_KEY missing: run with '
+        '--dart-define-from-file=env/<simulator|device>.env',
+      );
+    }
+    await Supabase.initialize(
+      url: supabaseUrl,
+      publishableKey: supabaseAnonKey,
+    );
+    final auth = Supabase.instance.client.auth;
+    const timeout = Duration(seconds: 10);
+
+    // The SDK persists the session. Check a stored one with the server: it
+    // may be stale (e.g. local data wiped), and this proves we can connect.
+    if (auth.currentSession != null) {
+      try {
+        await auth.getUser().timeout(timeout);
+      } on AuthException {
+        await auth.signOut();
+      }
+    }
+    if (auth.currentSession == null) {
+      if (_email.isEmpty || _password.isEmpty) {
+        throw StateError(
+          'TEST_EMAIL / TEST_PASSWORD missing from the env file',
+        );
+      }
+      await auth
+          .signInWithPassword(email: _email, password: _password)
+          .timeout(timeout);
+    }
+    return SupabaseDestination(Supabase.instance.client, bucket: backupBucket);
+  }
+
+  /// The signed-in user's id; every backup path starts with it.
+  String get userId => _userId;
 
   StorageFileApi get _bucket => _client.storage.from(bucket);
 

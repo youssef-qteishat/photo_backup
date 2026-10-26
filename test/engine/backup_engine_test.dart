@@ -5,6 +5,7 @@ import 'package:photo_backup/destination/backup_destination.dart';
 import 'package:photo_backup/domain/backup_job.dart';
 import 'package:photo_backup/domain/backup_progress.dart';
 import 'package:photo_backup/domain/media_item.dart';
+import 'package:photo_backup/domain/source_exception.dart';
 import 'package:photo_backup/engine/backup_engine.dart';
 import 'package:photo_backup/engine/job_queue.dart';
 import 'package:photo_backup/manifest/manifest_store.dart';
@@ -60,16 +61,18 @@ void main() {
   });
 
   /// A new engine on the shared DB: what reopening the app looks like.
-  Future<BackupEngine> engine({int maxFileBytes = 4 << 30}) async =>
-      BackupEngine(
-        queue: await JobQueue.open(db),
-        manifest: await ManifestStore.open(db),
-        destination: dest,
-        resolveFile: (item) async => files[item.assetId],
-        userId: _uid,
-        maxFileBytes: maxFileBytes,
-        sleep: (d) async => sleeps.add(d),
-      );
+  Future<BackupEngine> engine({
+    int maxFileBytes = 4 << 30,
+    FileResolver? resolveFile,
+  }) async => BackupEngine(
+    queue: await JobQueue.open(db),
+    manifest: await ManifestStore.open(db),
+    destination: dest,
+    resolveFile: resolveFile ?? (item) async => files[item.assetId],
+    userId: _uid,
+    maxFileBytes: maxFileBytes,
+    sleep: (d) async => sleeps.add(d),
+  );
 
   /// Writes a real file and returns its MediaItem. Same [fill] = same content.
   Future<MediaItem> asset(
@@ -191,6 +194,17 @@ void main() {
     expect(sleeps, isEmpty); // permanent: no retries
   });
 
+  test('a corrupt remote manifest does not stop the backup', () async {
+    dest.manifest = '{"test":true}'; // what the integration test once left
+    final item = await asset('a');
+
+    await (await engine()).run([item]);
+
+    expect((await jobs())['a']!.state, JobState.done);
+    // The end-of-run push replaced it with a valid manifest.
+    expect(dest.manifest, contains('"entries"'));
+  });
+
   test('running twice uploads nothing the second time', () async {
     final items = [await asset('a', fill: 1), await asset('b', fill: 2)];
     await (await engine()).run(items);
@@ -281,6 +295,57 @@ void main() {
     final job = (await jobs())['a']!;
     expect(job.state, JobState.skipped);
     expect(job.reason, 'asset no longer available');
+  });
+
+  test('a failed original fetch (e.g. iCloud) is retried', () async {
+    final item = await asset('a');
+    var calls = 0;
+    final e = await engine(
+      resolveFile: (item) async {
+        if (++calls == 1) {
+          throw const SourceException('iCloud', FailureKind.transient);
+        }
+        return files[item.assetId];
+      },
+    );
+
+    await e.run([item]);
+
+    expect((await jobs())['a']!.state, JobState.done);
+    expect(sleeps, const [Duration(seconds: 1)]);
+  });
+
+  test('an original that never downloads fails after 3 retries', () async {
+    final item = await asset('a');
+    final e = await engine(
+      resolveFile: (_) async =>
+          throw const SourceException('iCloud', FailureKind.transient),
+    );
+
+    await e.run([item]);
+
+    final job = (await jobs())['a']!;
+    expect(job.state, JobState.failed);
+    expect(job.failureKind, FailureKind.transient);
+    expect(job.attempts, 4);
+    expect(dest.uploadCount, 0);
+  });
+
+  test('oversize file fails before its original is fetched', () async {
+    final item = await asset('big', size: 100);
+    var fetched = false;
+    final e = await engine(
+      maxFileBytes: 50,
+      resolveFile: (item) async {
+        fetched = true;
+        return files[item.assetId];
+      },
+    );
+
+    await e.run([item]);
+
+    expect((await jobs())['big']!.state, JobState.failed);
+    expect(fetched, isFalse);
   });
 
   test('cancel returns the in-flight job to pending and cleans up', () async {
